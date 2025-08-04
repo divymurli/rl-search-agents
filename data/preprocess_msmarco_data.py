@@ -6,7 +6,7 @@
 # in-batch negative sampling and hard triples.]
 # -----------------------------------------------------------
 
-import argparse, random, json, os
+import argparse, random, json
 from pathlib import Path
 from typing import List, Dict
 
@@ -54,52 +54,54 @@ def main():
     ap.add_argument("--dev", type=int, default=5000, help="size of dev subset")
     ap.add_argument("--out_dir", type=Path, required=True)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--with_negatives", action="store_true",
+                   help="attach a same-query negative passage")
     args = ap.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
+    rng = random.Random(args.seed)
     print("🔄  Loading MS MARCO passage (train) from HF datasets…")
     dset = datasets.load_dataset("ms_marco", "v2.1", split="train", streaming=False)
 
-    query_positive_pairs: List[Dict] = []
+    triples: List[Dict] = []
     for ex in tqdm(dset, total=len(dset)):
         query = ex["query"]
         query_id = ex["query_id"]
-        passages_data = ex["passages"]
+        passages = ex["passages"]
 
-        is_selected = passages_data["is_selected"]
-        passage_texts = passages_data["passage_text"]
-        urls = passages_data["url"]
+         # collect indices of positives & negatives
+        pos_indices = [i for i, flag in enumerate(passages["is_selected"]) if flag==1]
+        neg_indices = [i for i, flag in enumerate(passages["is_selected"]) if flag==0]
+        if not neg_indices:
+            continue  # skip if query has no negative passage (rare)
+        for pi in pos_indices:
+            pos_txt = passages["passage_text"][pi].strip()
+            pos_id  = passages["url"][pi] or f"{query_id}_{pi}"
+            row = {
+                "query": query,
+                "query_id": query_id,
+                "positive": pos_txt,
+                "pos_id": pos_id,
+            }
+            if args.with_negatives:
+                ni = rng.choice(neg_indices)
+                neg_txt = passages["passage_text"][ni].strip()
+                neg_id  = passages["url"][ni] or f"{query_id}_{ni}"
+                row["negative"] = neg_txt
+                row["neg_id"] = neg_id
+            triples.append(row)
 
-        for i in range(len(is_selected)):
-    
-            if is_selected[i] == 1:
-                positive_passage = passage_texts[i]
-                positive_passage_id = urls[i]
+    print(f"🥡 Built {len(triples):,} rows (positives {'+ negatives' if args.with_negatives else ''}).")
 
-                query_positive_pairs.append(
-                    {
-                        "query": query,
-                        "query_id": query_id,
-                        "passage": positive_passage,
-                        "passage_id": positive_passage_id
-                    }
-                )
+    train = stratified_sample(triples, args.num, args.seed)
+    train_key = {(r["query_id"], r["pos_id"]) for r in train}
+    remaining = [r for r in triples if (r["query_id"], r["pos_id"]) not in train_key]
+    dev = stratified_sample(remaining, args.dev, args.seed+1)
 
-    print(f"Positives pool size: {len(query_positive_pairs)}")
-
-    train_subset = stratified_sample(query_positive_pairs, args.num, args.seed)
-    print("train stratification complete")
-
-    # extremely inefficient and can be heavily optimized. just take away the smaller set from the larger one and sample
-    # without replacement
-    train_ids = {(t["query_id"], t["passage_id"]) for t in query_positive_pairs}
-    remaining = [t for t in query_positive_pairs if (t["query_id"], t["passage_id"]) not in train_ids]
-    dev_subset = stratified_sample(remaining, args.dev, args.seed + 1)
-
-    print("stratification complete")
-    write_jsonl(args.out_dir / "train.jsonl", train_subset)
-    write_jsonl(args.out_dir / "dev.jsonl", dev_subset)
+    write_jsonl(args.out_dir/"train.jsonl", train)
+    write_jsonl(args.out_dir/"dev.jsonl", dev)
+    print("✅ Saved stratified splits →", args.out_dir)
 
     print("✅  Wrote",
           args.out_dir / "train.jsonl",
