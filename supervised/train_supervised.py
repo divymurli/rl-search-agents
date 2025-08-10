@@ -112,7 +112,7 @@ def main():
 
     if not os.path.exists(args.save_dir):
         os.makedirs(args.save_dir)
-    
+
     model = DualEncoder().to(device=device)
 
     optimizer = get_optimizer(model, lr=2e-5, weight_decay=0.01)
@@ -153,24 +153,57 @@ def main():
             q_emb, d_emb = model(query_input, doc_input)
             loss = info_nce_loss(q_emb, d_emb)
 
-            import ipdb
-            ipdb.set_trace()
-
             optimizer.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             scheduler.step()
-
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1)
 
             global_step += 1
             if global_step % args.checkpoint_every == 0:
                 save_model(model, args.save_dir, global_step)
-            if global_step % args.eval_every == 0:
-                mrr = evaluate_mrr(model, dev_dataloader, device)
-                print(f"MRR @ {global_step} steps: {mrr}")
 
-            print(f"Epoch {epoch} | Step {global_step} | Loss: {loss.item():.4f}")
+            if global_step % args.eval_every == 0:
+                 # ---- Eval loss ----
+                model.eval()
+                total_loss, n_batches = 0.0, 0
+                with torch.no_grad():
+                    for dev_batch in dev_dataloader:
+                        q_in = {
+                            "input_ids": dev_batch["query_input_ids"].to(device),
+                            "attention_mask": dev_batch["query_attention_mask"].to(device),
+                        }
+                        d_in = {
+                            "input_ids": dev_batch["doc_input_ids"].to(device),
+                            "attention_mask": dev_batch["doc_attention_mask"].to(device),
+                        }
+                        q_e, d_e = model(q_in, d_in)
+                        b_loss = info_nce_loss(q_e, d_e)
+                        total_loss += b_loss.item()
+                        n_batches += 1
+                eval_loss = total_loss / max(1, n_batches)
+                
+                # ---- Eval MRR ----
+                mrr = evaluate_mrr(model, dev_dataloader, device)
+                print(f"[Eval @ step {global_step}] loss={eval_loss:.4f}  MRR@10={mrr:.4f}")
+
+                # ---- Early stopping on eval loss ----
+                if eval_loss < best_eval_loss - 1e-6:  # tiny margin to avoid float noise
+                    best_eval_loss = eval_loss
+                    patience_counter = 0
+                    print(f"New best eval loss: {best_eval_loss:.4f}")
+                else:
+                    patience_counter += 1
+                    print(f"No improvement ({patience_counter}/{args.patience}).")
+                    if patience_counter >= args.patience:
+                        print("Early stopping triggered.")
+                        save_model(model, args.save_dir, global_step)  # final save
+                        return
+                    
+                model.train()
+
+            if global_step % 50 == 0:
+                print(f"Epoch {epoch} | Step {global_step} | Loss: {loss.item():.4f}")
 
 
 if __name__ == "__main__":
