@@ -103,6 +103,7 @@ def main():
     ap.add_argument("--dev", type=str, default="data/msmarco_50k/dev.jsonl")
     ap.add_argument("--num_epochs", type=int, default=5)
     ap.add_argument("--batch_size", type=int, default=64)
+    ap.add_argument("--patience", type=int, default=3)
     ap.add_argument("--checkpoint_every", type=int, default=500)
     ap.add_argument("--eval_every", type=int, default=500)
     ap.add_argument("--save_dir", type=str, default="./supervised/checkpoints")
@@ -199,7 +200,7 @@ def main():
                         print("Early stopping triggered.")
                         save_model(model, args.save_dir, global_step)  # final save
                         return
-                    
+
                 model.train()
 
             if global_step % 50 == 0:
