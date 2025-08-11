@@ -99,6 +99,44 @@ def evaluate_mrr(model, dataloader, device, k=10):
 
     return mrr_total / num_queries if num_queries > 0 else 0.0
 
+
+@torch.no_grad()
+def evaluate_mrr_full(model, dev_loader, device, k=10):
+    model.eval()
+    all_q, all_d = [], []
+
+    # 1) Encode all queries and docs (assumes each batch has paired q_i, d_i)
+    for batch in tqdm(dev_loader):
+        q_input = {
+            'input_ids': batch['query_input_ids'].to(device),
+            'attention_mask': batch['query_attention_mask'].to(device)
+        }
+        d_input = {
+            'input_ids': batch['doc_input_ids'].to(device),
+            'attention_mask': batch['doc_attention_mask'].to(device)
+        }
+        q_emb, d_emb = model(q_input, d_input)
+        all_q.append(q_emb)
+        all_d.append(d_emb)
+
+    Q = F.normalize(torch.cat(all_q, dim=0), dim=-1)   # [N, H]
+    D = F.normalize(torch.cat(all_d, dim=0), dim=-1)   # [N, H]
+
+    # 2) Full similarity matrix [N, N]
+    S = Q @ D.T
+
+    # 3) Rank of the diagonal item for each row
+    # Larger is better, so we argsort descending
+    ranks = torch.argsort(S, dim=1, descending=True)
+    idx    = torch.arange(S.size(0), device=S.device)
+    # Find where the true doc index (i) appears in sorted indices for row i
+    diag_positions = (ranks == idx.unsqueeze(1)).nonzero(as_tuple=False)[:,1]  # [N]
+    ranks_1based   = diag_positions + 1
+
+    # 4) MRR@k
+    mrr = (1.0 / ranks_1based.clamp_min(1)).masked_fill(ranks_1based > k, 0.0).mean().item()
+    return mrr
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--train", type=str, default="data/msmarco_50k/train.jsonl")
@@ -128,7 +166,7 @@ def main():
     dev_dataset = QueryPassageDataset(dev_dicts, tokenizer=tokenizer)
 
     train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
-    dev_dataloader = DataLoader(dev_dataset, batch_size=args.batch_size)
+    dev_dataloader = DataLoader(dev_dataset, batch_size=args.batch_size, shuffle=False)
 
     num_training_steps = args.num_epochs * len(train_dataloader)
     warmup_steps = int(0.1 * num_training_steps)
@@ -139,6 +177,11 @@ def main():
         num_warmup_steps=warmup_steps,
         num_training_steps=num_training_steps
     )
+
+    best_eval_loss = float('inf')
+
+    mrr = evaluate_mrr_full(model, dev_dataloader, device)
+    print(f"starting MRR: {mrr}")
 
     global_step = 0
     for epoch in range(args.num_epochs):
@@ -171,7 +214,7 @@ def main():
                 model.eval()
                 total_loss, n_batches = 0.0, 0
                 with torch.no_grad():
-                    for dev_batch in dev_dataloader:
+                    for dev_batch in tqdm(dev_dataloader)
                         q_in = {
                             "input_ids": dev_batch["query_input_ids"].to(device),
                             "attention_mask": dev_batch["query_attention_mask"].to(device),
@@ -187,7 +230,7 @@ def main():
                 eval_loss = total_loss / max(1, n_batches)
 
                 # ---- Eval MRR ----
-                mrr = evaluate_mrr(model, dev_dataloader, device)
+                mrr = evaluate_mrr_full(model, dev_dataloader, device)
                 print(f"[Eval @ step {global_step}] loss={eval_loss:.4f}  MRR@10={mrr:.4f}")
 
                 # ---- Early stopping on eval loss ----
