@@ -1,4 +1,5 @@
 import argparse
+from tqdm import tqdm
 
 import torch
 import  torch.nn as nn
@@ -66,7 +67,7 @@ def evaluate_mrr(model, dataloader, device, k=10):
     num_queries = 0
 
     with torch.no_grad():
-        for batch in dataloader:
+        for batch in tqdm(dataloader):
             query_input = {
                 'input_ids': batch['query_input_ids'].to(device),
                 'attention_mask': batch['query_attention_mask'].to(device)
@@ -204,8 +205,8 @@ def main():
 
                 model.train()
 
-            if global_step % 50 == 0:
-                print(f"Epoch {epoch} | Step {global_step} | Loss: {loss.item():.4f}")
+
+            print(f"Epoch {epoch} | Step {global_step} | Loss: {loss.item():.4f}")
 
 
 if __name__ == "__main__":

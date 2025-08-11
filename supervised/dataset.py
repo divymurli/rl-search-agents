@@ -9,13 +9,13 @@ class QueryPassageDataset(Dataset):
 
     def __len__(self):
         return len(self.query_passage_dict_list)
-    
+
     def __getitem__(self, index):
 
         query_passage_pair = self.query_passage_dict_list[index]
 
         query = query_passage_pair["query"]
-        passage = query_passage_pair["passage"]
+        passage = query_passage_pair["positive"]
 
         q = self.tokenizer(query, truncation=True, padding='max_length',
                            max_length=self.max_len, return_tensors='pt')
