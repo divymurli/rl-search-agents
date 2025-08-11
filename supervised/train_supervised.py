@@ -3,7 +3,8 @@ import argparse
 import torch
 import  torch.nn as nn
 import torch.nn.functional as F
-from transformers import BertTokenizer, AdamW, get_scheduler
+from torch.optim import AdamW
+from transformers import BertTokenizer, get_scheduler
 from dataset import QueryPassageDataset
 from dual_encoder import DualEncoder
 
@@ -183,7 +184,7 @@ def main():
                         total_loss += b_loss.item()
                         n_batches += 1
                 eval_loss = total_loss / max(1, n_batches)
-                
+
                 # ---- Eval MRR ----
                 mrr = evaluate_mrr(model, dev_dataloader, device)
                 print(f"[Eval @ step {global_step}] loss={eval_loss:.4f}  MRR@10={mrr:.4f}")
