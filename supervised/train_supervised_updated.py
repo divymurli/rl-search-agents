@@ -7,12 +7,11 @@ import torch.nn.functional as F
 from torch.optim import AdamW
 from transformers import BertTokenizer, get_scheduler
 from dataset import QueryPassageDataset
-from dual_encoder import DualEncoder
 
 from torch.utils.data import DataLoader
-
 import os, sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from models.dual_encoder import DualEncoder
 
 from utils import load_jsonl_file
 
@@ -22,6 +21,45 @@ def save_model(model, save_dir, step):
     torch.save(model.state_dict(), model_path)
 
     print(f"Saved checkpoint at step {step} to {model_path}")
+
+def load_dual_encoder(checkpoint_path, model_name='bert-base-uncased', pooling='cls', device='cpu'):
+    """Load DualEncoder from checkpoint with proper error handling"""
+    
+    # Initialize model
+    model = DualEncoder(model_name=model_name, pooling=pooling)
+    
+    try:
+        # Load checkpoint
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        
+        # Handle different checkpoint formats
+        if isinstance(checkpoint, dict):
+            if 'model_state_dict' in checkpoint:
+                state_dict = checkpoint['model_state_dict']
+            elif 'state_dict' in checkpoint:
+                state_dict = checkpoint['state_dict']
+            else:
+                state_dict = checkpoint
+        else:
+            # Assume it's directly the state dict
+            state_dict = checkpoint
+        
+        # Load state dict
+        missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+        
+        if missing_keys:
+            print(f"Warning: Missing keys in checkpoint: {missing_keys}")
+        if unexpected_keys:
+            print(f"Warning: Unexpected keys in checkpoint: {unexpected_keys}")
+        
+        print(f"Successfully loaded model from {checkpoint_path}")
+        
+    except Exception as e:
+        print(f"Error loading checkpoint: {e}")
+        raise
+    
+    model.eval()
+    return model
 
 def info_nce_loss(query_embeds, doc_embeds, temperature=1.0):
 
@@ -139,8 +177,8 @@ def evaluate_mrr_full(model, dev_loader, device, k=10):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--train", type=str, default="data/msmarco_50k/train.jsonl")
-    ap.add_argument("--dev", type=str, default="data/msmarco_50k/dev.jsonl")
+    ap.add_argument("--train", type=str, default="data/msmarco_100k/train.jsonl")
+    ap.add_argument("--dev", type=str, default="data/msmarco_100k/dev.jsonl")
     ap.add_argument("--num_epochs", type=int, default=10)
     ap.add_argument("--batch_size", type=int, default=64)
     ap.add_argument("--gradient_accumulation_steps", type=int, default=1, 
@@ -192,6 +230,8 @@ def main():
 
     best_eval_loss = float('inf')
     patience_counter = 0
+
+    model.to(device)
 
     mrr = evaluate_mrr_full(model, dev_dataloader, device)
     print(f"Starting MRR: {mrr:.4f}")

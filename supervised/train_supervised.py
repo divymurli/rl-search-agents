@@ -147,6 +147,7 @@ def main():
     ap.add_argument("--checkpoint_every", type=int, default=500)
     ap.add_argument("--eval_every", type=int, default=500)
     ap.add_argument("--save_dir", type=str, default="./supervised/checkpoints")
+    ap.add_argument("--temperature", type=float, default=1.0)
     args = ap.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -169,7 +170,7 @@ def main():
     dev_dataloader = DataLoader(dev_dataset, batch_size=args.batch_size, shuffle=False)
 
     num_training_steps = args.num_epochs * len(train_dataloader)
-    warmup_steps = int(0.1 * num_training_steps)
+    warmup_steps = int(0.2 * num_training_steps)
 
     scheduler = get_scheduler(
         "linear",
@@ -197,7 +198,7 @@ def main():
             }
 
             q_emb, d_emb = model(query_input, doc_input)
-            loss = info_nce_loss(q_emb, d_emb)
+            loss = info_nce_loss(q_emb, d_emb, temperature=args.temperature)
 
             optimizer.zero_grad()
             loss.backward()
@@ -214,7 +215,7 @@ def main():
                 model.eval()
                 total_loss, n_batches = 0.0, 0
                 with torch.no_grad():
-                    for dev_batch in tqdm(dev_dataloader)
+                    for dev_batch in tqdm(dev_dataloader):
                         q_in = {
                             "input_ids": dev_batch["query_input_ids"].to(device),
                             "attention_mask": dev_batch["query_attention_mask"].to(device),
