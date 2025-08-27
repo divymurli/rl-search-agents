@@ -15,12 +15,15 @@ from models.dual_encoder import DualEncoder
 
 from utils import load_jsonl_file
 
-def save_model(model, save_dir, step):
+def save_model(model, save_dir, step=None, filename=None):
     os.makedirs(save_dir, exist_ok=True)
-    model_path = os.path.join(save_dir, f"checkpoint_step{step}.pt")
+    if filename is None:
+        assert step is not None, "Either `step` or `filename` must be provided."
+        model_path = os.path.join(save_dir, f"checkpoint_step{step}.pt")
+    else:
+        model_path = os.path.join(save_dir, filename)
     torch.save(model.state_dict(), model_path)
-
-    print(f"Saved checkpoint at step {step} to {model_path}")
+    print(f"Saved checkpoint to {model_path}")
 
 def load_dual_encoder(checkpoint_path, model_name='bert-base-uncased', pooling='cls', device='cpu'):
     """Load DualEncoder from checkpoint with proper error handling"""
@@ -186,7 +189,7 @@ def main():
     ap.add_argument("--patience", type=int, default=3)
     ap.add_argument("--checkpoint_every", type=int, default=500)
     ap.add_argument("--eval_every", type=int, default=500)
-    ap.add_argument("--save_dir", type=str, default="./supervised/checkpoints")
+    ap.add_argument("--save_dir", type=str, default="./supervised/checkpoints_100k")
     ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("--lr", type=float, default=2e-5)
     args = ap.parse_args()
@@ -231,11 +234,14 @@ def main():
     best_eval_loss = float('inf')
     patience_counter = 0
 
-    model.to(device)
+    # ad hoc: load the checkpointed model
+    # model = load_dual_encoder("/home/ubuntu/rl-search-agents/supervised/checkpoints/checkpoint_step1000.pt", device=device)
+    # model.to(device)
 
     mrr = evaluate_mrr_full(model, dev_dataloader, device)
     print(f"Starting MRR: {mrr:.4f}")
 
+    best_dev_mrr = 0.0
     global_step = 0
     accumulation_loss = 0.0
     
@@ -303,6 +309,13 @@ def main():
                     # ---- Eval MRR ----
                     mrr = evaluate_mrr_full(model, dev_dataloader, device)
                     print(f"[Eval @ step {global_step}] loss={eval_loss:.4f}  MRR@10={mrr:.4f}")
+
+                    # ---- Save BEST-MRR checkpoint ----
+                    if mrr > best_dev_mrr + 1e-6:  # tiny epsilon to avoid float noise
+                        best_dev_mrr = mrr
+                        best_mrr_step = global_step
+                        save_model(model, args.save_dir, filename="best_mrr.pt")
+                        print(f"[New BEST MRR] step={best_mrr_step}  MRR@10={best_dev_mrr:.4f}  -> saved best_mrr.pt")
 
                     # ---- Early stopping on eval loss ----
                     # TODO: add eval accuracy as another patience counter
