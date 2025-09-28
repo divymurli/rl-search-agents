@@ -93,13 +93,16 @@ def _slice_buckets(counts: Dict[str, int]) -> Tuple[slice, slice, slice]:
 
 # ---- the memory-light Dataset ----
 
+# ---- the memory-light Dataset (fixed curriculum) ----
+
 class MsMarcoCandidatesIndexedDataset(Dataset):
     """
     Streams JSONL by seeking to byte offsets; does NOT load all JSON into memory.
     Expects each JSON line to contain:
-      query_id, query, pos_id, candidates (with layout [pos|hard...|mid...|easy...]),
-      meta.neg_bucket_counts
+      query_id, query, pos_id, candidates (layout [pos|hard...|mid...|easy...]),
+      meta.neg_bucket_counts = {"hard": int, "mid": int, "easy": int}
     """
+
     def __init__(
         self,
         jsonl_path: str,
@@ -110,6 +113,8 @@ class MsMarcoCandidatesIndexedDataset(Dataset):
         seed: int = 42,
         qid_limit: int = 0,
         subset_stride: int = 1,
+        include_texts: bool = True,
+        max_step: int = 50_000,
     ):
         self.jsonl_path = jsonl_path
         self.idx_path = idx_path or (jsonl_path + ".idx")
@@ -118,13 +123,10 @@ class MsMarcoCandidatesIndexedDataset(Dataset):
             build_offset_index(self.jsonl_path, self.idx_path)
         self.offsets = load_offsets(self.idx_path)
 
-        # Subset view without copying big arrays
+        # Subset view
+        self.view = None
         if subset_stride > 1:
-            idxs = range(0, len(self.offsets), subset_stride)
-            self.view = list(idxs)
-        else:
-            self.view = None
-
+            self.view = list(range(0, len(self.offsets), subset_stride))
         if qid_limit:
             if self.view is None:
                 self.view = list(range(min(qid_limit, len(self.offsets))))
@@ -132,20 +134,31 @@ class MsMarcoCandidatesIndexedDataset(Dataset):
                 self.view = self.view[:qid_limit]
 
         self.text_store = text_store or MsMarcoTextStore()
-        self.group_k = group_k
-        self.seed = seed
+        self.include_texts = include_texts
+        self.group_k = int(group_k)
+        self.seed = int(seed)
 
-        # training step for curriculum (can be updated externally)
+        # curriculum (dataset-level)
         self._global_step = 0
-        self._total_steps = max(1, len(self))  # default
+        self._total_steps = max(1, int(max_step))  # for ramp; you can override later
 
-        # file handle is opened lazily (and reopened in worker processes)
+        # file handle (opened lazily; reset on fork)
         self._fp = None
 
+    # ---------- public controls ----------
+    def set_global_step(self, step: int):
+        self._global_step = max(0, int(step))
+
+    def set_total_steps(self, total: int):
+        self._total_steps = max(1, int(total))
+
+    def set_group_k(self, k: int):
+        self.group_k = int(k)
+
+    # ---------- Dataset API ----------
     def __len__(self):
         return len(self.view) if self.view is not None else len(self.offsets)
 
-    # make dataset pickle-safe for DataLoader workers
     def __getstate__(self):
         state = self.__dict__.copy()
         state["_fp"] = None
@@ -155,110 +168,146 @@ class MsMarcoCandidatesIndexedDataset(Dataset):
         if self._fp is None:
             self._fp = open(self.jsonl_path, "rb", buffering=io.DEFAULT_BUFFER_SIZE)
 
-    # curriculum controls
-    def set_global_step(self, step: int):
-        self._global_step = max(0, int(step))
-
-    def set_total_steps(self, total: int):
-        self._total_steps = max(1, int(total))
-
-    def _margin_bucket_probs(self) -> Tuple[float, float, float]:
-        t = min(1.0, self._global_step / float(self._total_steps))
-        p_h = 0.05 * (1 - t) + 0.50 * t
-        p_m = 0.15 * (1 - t) + 0.30 * t
-        p_e = max(0.0, 1.0 - p_h - p_m)
-        return p_h, p_m, p_e
-
-    # sampling helpers (same logic as before, but on-demand)
-    def _sample_group_negs(self, rec: Dict, rng: random.Random) -> List[str]:
-        counts = rec["meta"]["neg_bucket_counts"]
-        cands  = rec["candidates"]
-        sl_h, sl_m, sl_e = _slice_buckets(counts)
-        pool_h, pool_m, pool_e = cands[sl_h], cands[sl_m], cands[sl_e]
-
-        sizes = [len(pool_h), len(pool_m), len(pool_e)]
-        total = max(1, sum(sizes))
-        want = [int(self.group_k * s / total) for s in sizes]
-        while sum(want) < self.group_k:
-            i = max(range(3), key=lambda j: (sizes[j] - want[j], sizes[j]))
-            want[i] += 1
-        want = [min(want[i], sizes[i]) for i in range(3)]
-        need = self.group_k - sum(want)
-        if need > 0:
-            caps = [sizes[i] - want[i] for i in range(3)]
-            for _ in range(need):
-                j = max(range(3), key=lambda x: caps[x])
-                if caps[j] <= 0: break
-                want[j] += 1; caps[j] -= 1
-
-        chosen = []
-        if want[0] > 0: chosen.extend(rng.sample(pool_h, want[0]))
-        if want[1] > 0: chosen.extend(rng.sample(pool_m, want[1]))
-        if want[2] > 0: chosen.extend(rng.sample(pool_e, want[2]))
-        if len(chosen) < self.group_k:
-            leftovers = [d for d in (pool_h + pool_m + pool_e) if d not in set(chosen)]
-            take = min(self.group_k - len(chosen), len(leftovers))
-            if take > 0:
-                chosen.extend(rng.sample(leftovers, take))
-        return chosen
-
-    def _sample_margin_neg(self, rec: Dict, rng: random.Random) -> Optional[str]:
-        counts = rec["meta"]["neg_bucket_counts"]
-        cands  = rec["candidates"]
-        sl_h, sl_m, sl_e = _slice_buckets(counts)
-        pool_h, pool_m, pool_e = cands[sl_h], cands[sl_m], cands[sl_e]
-
-        p_h, p_m, p_e = self._margin_bucket_probs()
-        buckets = []
-        if pool_h: buckets.append(("hard", p_h, pool_h))
-        if pool_m: buckets.append(("mid",  p_m, pool_m))
-        if pool_e: buckets.append(("easy", p_e, pool_e))
-        if not buckets: return None
-        names, probs, pools = zip(*buckets)
-        s = sum(probs) or 1.0
-        probs = [p/s for p in probs]
-        idx = _per_query_rng(self.seed, rec["query_id"]).choices(range(len(pools)), weights=probs, k=1)[0]
-        pool = pools[idx]
-        return rng.choice(pool)
-
     def _read_line(self, i: int) -> Dict:
-        # get byte offset and read just that line
         src_idx = self.view[i] if self.view is not None else i
         offset = int(self.offsets[src_idx])
         self._ensure_open()
         self._fp.seek(offset)
         line = self._fp.readline()
+        if isinstance(line, (bytes, bytearray)):
+            line = line.decode("utf-8")
         return json.loads(line)
 
     def __getitem__(self, i: int) -> Dict:
         rec = self._read_line(i)
-        qid = rec["query_id"]
-        rng = _per_query_rng(self.seed, qid)
 
-        # guard if counts missing
+        # guard: synthesize counts if missing
         if "meta" not in rec or "neg_bucket_counts" not in rec["meta"]:
             n = len(rec["candidates"]) - 1
-            c = n // 3
-            rec.setdefault("meta", {})["neg_bucket_counts"] = {"hard": c, "mid": c, "easy": n - 2*c}
+            c = max(0, n // 3)
+            rec.setdefault("meta", {})["neg_bucket_counts"] = {
+                "hard": c, "mid": c, "easy": max(0, n - 2*c)
+            }
 
+        qid     = rec["query_id"]
         q_text  = rec["query"]
         pos_id  = rec["pos_id"]
-        pos_txt = self.text_store.get(pos_id)
+        counts  = rec["meta"]["neg_bucket_counts"]
+        cands   = rec["candidates"]            # [pos][hard...][mid...][easy...]
 
-        neg_ids = self._sample_group_negs(rec, rng)
-        neg_txt = [self.text_store.get(d) for d in neg_ids]
+        # step-aware sampling
+        group_neg_ids = self._sample_group_negs(cands, counts, qid)
+        margin_neg_id = self._sample_margin_neg(cands, counts, qid)
 
-        margin_id  = self._sample_margin_neg(rec, rng)
-        margin_txt = self.text_store.get(margin_id) if margin_id else None
-
-        return {
+        out = {
             "qid": qid,
             "query_text": q_text,
             "pos_id": pos_id,
-            "pos_text": pos_txt,
-            "neg_ids": neg_ids,
-            "neg_texts": neg_txt,
-            "margin_id": margin_id,
-            "margin_text": margin_txt,
-            "bucket_counts": rec["meta"]["neg_bucket_counts"],
+            "neg_ids": group_neg_ids,
+            "margin_id": margin_neg_id,
+            "bucket_counts": counts,
+            "step": self._global_step,
         }
+
+        if self.include_texts:
+            out["pos_text"] = self.text_store.get(pos_id)
+            out["neg_texts"] = [self.text_store.get(d) for d in group_neg_ids]
+            out["margin_text"] = self.text_store.get(margin_neg_id) if margin_neg_id else None
+
+        return out
+
+    # ---------- curriculum & RNG ----------
+    def _p_hme(self) -> Tuple[float, float, float]:
+        # linear ramp: easy→hard; always keep some mix
+        t = min(1.0, self._global_step / float(self._total_steps))
+        p_h = 0.05*(1 - t) + 0.50*t
+        p_m = 0.15*(1 - t) + 0.30*t
+        p_e = max(0.0, 1.0 - p_h - p_m)
+        return (p_h, p_m, p_e)
+
+    @staticmethod
+    def _md5_int(s: str) -> int:
+        return int(hashlib.md5(s.encode("utf-8")).hexdigest()[:16], 16)
+
+    def _rng(self, qid: str, salt: int = 0) -> random.Random:
+        # Deterministic across runs; varies with (seed, qid, step, salt)
+        key = f"{self.seed}|{qid}|{self._global_step}|{salt}"
+        return random.Random(self._md5_int(key))
+
+    @staticmethod
+    def _bucket_slices(counts: Dict[str, int]) -> Tuple[slice, slice, slice]:
+        n_h = counts.get("hard", 0)
+        n_m = counts.get("mid", 0)
+        n_e = counts.get("easy", 0)
+        h0, h1 = 1, 1 + n_h
+        m0, m1 = h1, h1 + n_m
+        e0, e1 = m1, m1 + n_e
+        return slice(h0, h1), slice(m0, m1), slice(e0, e1)
+
+    @staticmethod
+    def _weighted_pick(rnd: random.Random, weights: List[float]) -> int:
+        s = sum(weights) or 1.0
+        u = rnd.random() * s
+        acc = 0.0
+        for i, w in enumerate(weights):
+            acc += w
+            if u <= acc:
+                return i
+        return len(weights) - 1
+
+    # ---------- samplers (now step-aware) ----------
+    def _sample_group_negs(self, cands: List[str], counts: Dict[str, int], qid: str) -> List[str]:
+        sl_h, sl_m, sl_e = self._bucket_slices(counts)
+        pool_h, pool_m, pool_e = cands[sl_h], cands[sl_m], cands[sl_e]
+
+        # curriculum-driven targets (NOT pool-size driven)
+        K = min(self.group_k, len(pool_h) + len(pool_m) + len(pool_e))
+        p_h, p_m, p_e = self._p_hme()
+        raw = [p_h*K, p_m*K, p_e*K]
+        tgt = [int(x) for x in raw]
+        # distribute rounding remainder to largest fractional parts
+        for _ in range(K - sum(tgt)):
+            j = max(range(3), key=lambda i: (raw[i] - tgt[i], i))
+            tgt[j] += 1
+
+        # clamp to availability and backfill
+        sizes = [len(pool_h), len(pool_m), len(pool_e)]
+        tgt = [min(tgt[i], sizes[i]) for i in range(3)]
+        need = K - sum(tgt)
+        if need > 0:
+            # backfill preferring harder buckets first
+            caps = [sizes[i] - tgt[i] for i in range(3)]
+            order = [0, 1, 2]  # hard -> mid -> easy
+            for _ in range(need):
+                j = next((i for i in order if caps[i] > 0), None)
+                if j is None: break
+                tgt[j] += 1; caps[j] -= 1
+
+        rnd = self._rng(qid, salt=0xA1)
+        chosen: List[str] = []
+        if tgt[0] > 0: chosen += rnd.sample(pool_h, tgt[0])
+        if tgt[1] > 0: chosen += rnd.sample(pool_m, tgt[1])
+        if tgt[2] > 0: chosen += rnd.sample(pool_e, tgt[2])
+
+        # backstop uniqueness
+        if len(chosen) < K:
+            leftovers = [d for d in (pool_h + pool_m + pool_e) if d not in set(chosen)]
+            take = min(K - len(chosen), len(leftovers))
+            if take > 0:
+                chosen += rnd.sample(leftovers, take)
+        return chosen
+
+    def _sample_margin_neg(self, cands: List[str], counts: Dict[str, int], qid: str) -> Optional[str]:
+        sl_h, sl_m, sl_e = self._bucket_slices(counts)
+        pool_h, pool_m, pool_e = cands[sl_h], cands[sl_m], cands[sl_e]
+        if not (pool_h or pool_m or pool_e):
+            return None
+
+        p_h, p_m, p_e = self._p_hme()
+        rnd = self._rng(qid, salt=0xB2)
+
+        pools = [pool_h, pool_m, pool_e]
+        weights = [p_h if pool_h else 0.0, p_m if pool_m else 0.0, p_e if pool_e else 0.0]
+        j = self._weighted_pick(rnd, weights)
+        pool = pools[j] if pools[j] else (pool_h or pool_m or pool_e)
+        return rnd.choice(pool)
