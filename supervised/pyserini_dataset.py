@@ -116,6 +116,12 @@ class MsMarcoCandidatesIndexedDataset(Dataset):
         include_texts: bool = True,
         max_step: int = 50_000,
     ):
+        # efficient peaking mechanism for reading parts of a json
+        # idea:
+        # If we know the offset for line i, you can:
+        # seek(offset_i) to move the file pointer there,
+        # readline() to read exactly that one JSON record,
+        # json.loads(...) to parse it.
         self.jsonl_path = jsonl_path
         self.idx_path = idx_path or (jsonl_path + ".idx")
         if not os.path.exists(self.idx_path):
