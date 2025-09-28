@@ -314,6 +314,9 @@ class MsMarcoCandidatesIndexedDataset(Dataset):
 
         pools = [pool_h, pool_m, pool_e]
         weights = [p_h if pool_h else 0.0, p_m if pool_m else 0.0, p_e if pool_e else 0.0]
+        # e.g. if weights = [0.05, 0.45, 0.5] (hard/easy/med):
+        # sample 0, 1, 2 according to this distribution; namely
+        # 0 with prob 5%, 1, with prob 45% and 2 with prob 50%.
         j = self._weighted_pick(rnd, weights)
         pool = pools[j] if pools[j] else (pool_h or pool_m or pool_e)
         return rnd.choice(pool)
