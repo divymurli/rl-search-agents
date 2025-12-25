@@ -1,6 +1,8 @@
 from __future__ import annotations
 import json
 import argparse
+import time
+import os
 from typing import List, Dict, Optional
 
 import torch
@@ -113,10 +115,14 @@ def eval_dev_full_jsonl(
 
 
 # Defaults you gave (can be overridden via CLI)
-# DEFAULT_CKPT = "/home/ubuntu/rl-search-agents/ckpts/infonce_baseline/step30000.pt"
-# DEFAULT_CKPT = "/home/ubuntu/rl-search-agents/ckpts/infonce_margin_no_curriculum/step30000.pt"
 DEFAULT_CKPT = "/home/ubuntu/rl-search-agents/ckpts/infonce_group_curriculum_groupk_4/step30000.pt"
 DEFAULT_JSONL = "/home/ubuntu/rl-search-agents/data/rl-search-datasets/candidates_dev_1k_rm3_backoff.jsonl"
+
+
+def _ensure_parent_dir(path: str):
+    d = os.path.dirname(os.path.abspath(path))
+    if d and not os.path.exists(d):
+        os.makedirs(d, exist_ok=True)
 
 
 def main():
@@ -124,6 +130,14 @@ def main():
     parser.add_argument("--ckpt", type=str, default=DEFAULT_CKPT)
     parser.add_argument("--jsonl", type=str, default=DEFAULT_JSONL)
     parser.add_argument("--device", type=str, default="cuda", help='"cuda", "cpu", or "auto"')
+
+    parser.add_argument(
+        "--out_json",
+        type=str,
+        default=None,
+        help="If set, write metrics + provenance to this JSON file.",
+    )
+
     args = parser.parse_args()
 
     if args.device == "auto":
@@ -134,7 +148,7 @@ def main():
     print(f"Loading checkpoint from {args.ckpt}")
     ckpt_obj = torch.load(args.ckpt, map_location=device)
 
-    ckpt_args = ckpt_obj["args"]  # vars(args) from training
+    ckpt_args = ckpt_obj.get("args", {})  # vars(args) from training
 
     model_name = ckpt_args["model_name"]
     proj_dim = ckpt_args["proj_dim"]
@@ -161,6 +175,7 @@ def main():
     model.eval()
 
     print("Running dev eval over full candidate lists...")
+    t0 = time.time()
     metrics = eval_dev_full_jsonl(
         args.jsonl,
         store,
@@ -173,6 +188,7 @@ def main():
         limit_queries=dev_limit,
         l2_normalize_scores=normalize,
     )
+    elapsed = time.time() - t0
 
     print("\n=== Dev metrics (full candidates) ===")
     for k, v in metrics.items():
@@ -180,6 +196,40 @@ def main():
             print(f"{k}: {v:.4f}")
         else:
             print(f"{k}: {v}")
+
+    if args.out_json is not None:
+        _ensure_parent_dir(args.out_json)
+        record = {
+            "type": "eval_full_candidates",
+            "timestamp": time.time(),
+            "elapsed_sec": elapsed,
+            "ckpt_path": args.ckpt,
+            "jsonl_path": args.jsonl,
+            "device": device,
+            "metrics": metrics,
+            "ckpt_train_args": {
+                # keep the full thing if you want; this subset is usually enough
+                "model_name": model_name,
+                "proj_dim": proj_dim,
+                "normalize": normalize,
+                "max_q_len": max_q_len,
+                "max_d_len": max_d_len,
+                "dev_limit": dev_limit,
+                "prebuilt_index": prebuilt_index,
+                "loss_mode": ckpt_args.get("loss_mode"),
+                "margin_alpha": ckpt_args.get("margin_alpha"),
+                "margin_m": ckpt_args.get("margin_m"),
+                "group_k": ckpt_args.get("group_k"),
+                "group_beta": ckpt_args.get("group_beta"),
+                "group_temperature": ckpt_args.get("group_temperature"),
+                "lr": ckpt_args.get("lr"),
+                "batch_size": ckpt_args.get("batch_size"),
+                "accum_steps": ckpt_args.get("accum_steps"),
+            },
+        }
+        with open(args.out_json, "w", encoding="utf-8") as f:
+            json.dump(record, f, indent=2, sort_keys=True)
+        print(f"\nWrote metrics JSON to: {args.out_json}")
 
 
 if __name__ == "__main__":
