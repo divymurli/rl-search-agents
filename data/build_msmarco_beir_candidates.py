@@ -16,18 +16,18 @@ Examples:
 python build_msmarco_beir_candidates.py \
   --irds-key irds/beir_msmarco_train \
   --index-mode prebuilt --index msmarco-v1-passage \
-  --out data/candidates_train_1k_rm3_corrected_again.jsonl \
-  --skip-log logs/skipped_dev.jsonl \
+  --out data/candidates_train_1k_rm3_backoff.jsonl \
+  --skip-log logs/skipped_train.jsonl \
   --topk 5000 --n-negs 999 --hard-cut 400 --mid-cut 1000 \
   --batch-size 256 --threads 16 --rm3-backoff
 
-python build_msmarco_beir_candidates.py \
-  --irds-key irds/beir_msmarco_dev \
+python build_msmarco_beir_candidates.py \       
+  --irds-key irds/beir_msmarco_dev \  
   --index-mode prebuilt --index msmarco-v1-passage \
-  --out data/candidates_dev_1k.jsonl --skip-log logs/skipped_dev.jsonl \
-  --topk 5000 --n-negs 999 --hard-cut 200 --mid-cut 1000 \
-  --batch-size 128 --threads 16 \
-  --rm3-backoff --rm3-k 20000 --rm3-fb-terms 10 --rm3-fb-docs 10 --rm3-alpha 0.5
+  --out data/candidates_dev_1k_rm3_backoff.jsonl \                         
+  --skip-log logs/skipped_dev.jsonl \
+  --topk 5000 --n-negs 999 --hard-cut 400 --mid-cut 1000 \
+  --rm3-backoff --batch-size 256 --threads 16
 """
 
 from __future__ import annotations
