@@ -114,7 +114,7 @@ def eval_dev_full_jsonl(
     }
 
 
-# Defaults you gave (can be overridden via CLI)
+# Defaults (can be overridden via CLI)
 DEFAULT_CKPT = "/home/ubuntu/rl-search-agents/ckpts/infonce_group_curriculum_groupk_4/step30000.pt"
 DEFAULT_JSONL = "/home/ubuntu/rl-search-agents/data/rl-search-datasets/candidates_dev_1k_rm3_backoff.jsonl"
 
