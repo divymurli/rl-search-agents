@@ -30,8 +30,8 @@ run_exp () {
 # ==================================================================
 # 0) Baseline: in-batch InfoNCE
 # ==================================================================
-run_exp "ckpts/baseline_infonce" \
-  --loss_mode infonce
+# run_exp "ckpts/baseline_infonce" \
+#   --loss_mode infonce
 
 # ==================================================================
 # 1–3) Margin InfoNCE (fixed m=0.2, sweep alpha)
@@ -48,13 +48,13 @@ run_exp "ckpts/margin_a08_m02" \
 # ==================================================================
 # 4–6) Grouped InfoNCE (fixed beta=1.0, sweep k)
 # ==================================================================
-# run_exp "ckpts/grouped_k2_b10" \
-#   --loss_mode infonce_grouped --group_k 2 --group_beta 1.0 --group_temperature 0.05
+run_exp "ckpts/grouped_k2_b10" \
+  --loss_mode infonce_grouped --group_k 2 --group_beta 1.0 --group_temperature 0.05
 
-# run_exp "ckpts/grouped_k4_b10" \
-#   --loss_mode infonce_grouped --group_k 4 --group_beta 1.0 --group_temperature 0.05
+run_exp "ckpts/grouped_k4_b10" \
+  --loss_mode infonce_grouped --group_k 4 --group_beta 1.0 --group_temperature 0.05
 
-# run_exp "ckpts/grouped_k6_b10" \
-#   --loss_mode infonce_grouped --group_k 6 --group_beta 1.0 --group_temperature 0.05
+run_exp "ckpts/grouped_k6_b10" \
+  --loss_mode infonce_grouped --group_k 6 --group_beta 1.0 --group_temperature 0.05
 
 echo "All experiments completed successfully."
