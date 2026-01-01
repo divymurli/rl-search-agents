@@ -134,7 +134,9 @@ See `run_experiments.sh` for a comprehensive list of command line inputs.
 
 See `run_evals.sh` for a comprehensive list of evals to run. For a single experiment, update `DEFAULT_CKPT` and `DEFAULT_JSONL` to point respectively to the desired model checkpoint (from a training run) and the (test) set generated from above from (*).
 
+# Limitations
 
+This setup is currently configured to run on a single GPU. Multi GPU support is incoming for future, larger experiments. As of December 2025, we ran all of our supervised finetuning experiments on a single NVIDIA L4 GPU (24GB RAM).
 
 
 
